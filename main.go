@@ -10,9 +10,6 @@ import (
 	"strings"
 )
 
-// Storage a global map to store key-value pairs
-var storage map[string]bool
-
 // JSON-RPC response structure
 type RPCResponse struct {
 	Result json.RawMessage `json:"result"`
@@ -35,25 +32,53 @@ type Transaction struct {
 	Value       string `json:"value"`
 }
 
+// MemoryStorage represents an in-memory data storage.
+type MemoryStorage struct {
+	subscribers map[string]bool // Map from address to subscribers
+}
+
+// NewMemoryStorage initializes a new MemoryStorage instance.
+func NewMemoryStorage() *MemoryStorage {
+	return &MemoryStorage{
+		subscribers: make(map[string]bool),
+	}
+}
+
+func (memory *MemoryStorage) GetSubscribers() (map[string]bool, error) {
+	return memory.subscribers, nil
+}
+
+func (memory *MemoryStorage) SetSubscriber(address string) error {
+	memory.subscribers[address] = true
+	return nil
+}
+
+func (memory *MemoryStorage) IsSubscriber(address string) bool {
+	value, ok := memory.subscribers[address]
+	if !ok {
+		return false
+	}
+	return value
+}
+
 // Parser defines the interface for interacting with Ethereum blockchain.
 type Parser interface {
 	GetCurrentBlock() (uint64, error)
 	GetTransactions(address string) ([]Transaction, error)
 	SubscribeAddress(address string) bool
-	UnsubscribeAddress(address string) bool
 }
 
 // EthereumParser implements the Parser interface for Ethereum blockchain.
 type EthereumParser struct {
-	Endpoint    string
-	Subscribers map[string]bool // Map to track subscribed addresses
+	Endpoint string
+	memoryDB *MemoryStorage
 }
 
 // NewEthereumParser initializes a new EthereumParser instance.
-func NewEthereumParser(endpoint string, store map[string]bool) *EthereumParser {
+func NewEthereumParser(endpoint string, memoryDB *MemoryStorage) *EthereumParser {
 	return &EthereumParser{
-		Endpoint:    endpoint,
-		Subscribers: store,
+		Endpoint: endpoint,
+		memoryDB: memoryDB,
 	}
 }
 
@@ -77,6 +102,9 @@ func (parser *EthereumParser) GetCurrentBlock() (uint64, error) {
 func (parser *EthereumParser) GetTransactions(address string) ([]Transaction, error) {
 	var transactions []Transaction
 	var block Block
+	if !parser.memoryDB.IsSubscriber(address) {
+		return nil, fmt.Errorf("Address: %v is not subscribed", address)
+	}
 	blockNumber, err := parser.GetCurrentBlock()
 	if err != nil {
 		return nil, err
@@ -97,14 +125,10 @@ func (parser *EthereumParser) GetTransactions(address string) ([]Transaction, er
 
 // SubscribeAddress subscribes to an Ethereum address.
 func (parser *EthereumParser) SubscribeAddress(address string) bool {
-	parser.Subscribers[address] = true
-	return parser.Subscribers[address]
-}
-
-// UnsubscribeAddress unsubscribes from an Ethereum address.
-func (parser *EthereumParser) UnsubscribeAddress(address string) bool {
-	delete(parser.Subscribers, address)
-	return parser.Subscribers[address]
+	if err := parser.memoryDB.SetSubscriber(address); err != nil {
+		return false
+	}
+	return true
 }
 
 // callRPCMethod sends a JSON-RPC request to the Ethereum node.
@@ -180,13 +204,13 @@ func ParseToAnySlice(params ...interface{}) []interface{} {
 }
 
 func processCommands(cmdCh <-chan string) {
-	storage = make(map[string]bool)
-
 	// Ethereum node JSON-RPC endpoint (replace with your own endpoint)
 	endpoint := "https://cloudflare-eth.com"
 
+	memoryDB := NewMemoryStorage()
+
 	// Create EthereumParser instance
-	parser := NewEthereumParser(endpoint, storage)
+	parser := NewEthereumParser(endpoint, memoryDB)
 
 	var args []string
 	for {
@@ -194,7 +218,7 @@ func processCommands(cmdCh <-chan string) {
 		case cmd := <-cmdCh:
 			args = strings.Fields(cmd)
 			if len(args) < 1 {
-				fmt.Println("You need to define an action (getCurrentBlock, getTransaction, SubscribeAddress)")
+				fmt.Println("\nYou need to define an action (getCurrentBlock, getTransaction, SubscribeAddress)")
 				continue
 			}
 			action := args[0]
@@ -209,35 +233,31 @@ func processCommands(cmdCh <-chan string) {
 			case "getCurrentBlock":
 				blockNumber, err := parser.GetCurrentBlock()
 				if err != nil {
-					fmt.Printf("Error getting current block: %v", err)
+					fmt.Printf("\nError getting current block: %v", err)
 					continue
 				}
 				fmt.Println(blockNumber)
 				continue
 			case "getTransaction":
 				if address == "" {
-					fmt.Println("You need to define an address")
-					continue
-				}
-				if !parser.Subscribers[address] {
-					fmt.Printf("Address: %v is not subscribed", address)
+					fmt.Println("\nYou need to define an address")
 					continue
 				}
 				transactions, err := parser.GetTransactions(address)
 				if err != nil {
-					fmt.Printf("Error getting current block: %v", err)
+					fmt.Printf("\nError getting transactions: %v", err)
 					continue
 				}
 				fmt.Println(transactions)
 				continue
 			case "subscribeAddress":
 				if address == "" {
-					fmt.Println("You need to define an address")
+					fmt.Println("\nYou need to define an address")
 					continue
 				}
 				isSubscribed := parser.SubscribeAddress(address)
 				if !isSubscribed {
-					fmt.Printf("Error subscribing to address: %v", address)
+					fmt.Printf("\nError subscribing to address: %v", address)
 					continue
 				}
 				fmt.Println(isSubscribed)
